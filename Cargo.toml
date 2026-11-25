@@ -2,7 +2,7 @@
 name = "anynix"
 version = "0.1.0"
 edition = "2024"
-description = ""
+description = "A any dynamic unix disk"
 lincense = "AGPL-3.0-or-later"
 repository = "https://github.com/dualys/anynix"
 [dependencies]
