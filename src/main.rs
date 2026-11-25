@@ -2,6 +2,7 @@ mod archive;
 pub mod builder;
 mod cli;
 mod crypto;
+mod install;
 mod proxmox;
 pub mod release_v2;
 mod runner;
@@ -20,7 +21,11 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
-    match Cli::parse().command {
+    execute(Cli::parse().command).await
+}
+
+pub(crate) async fn execute(command: Command) -> Result<()> {
+    match command {
         Command::Keygen { role, out } => {
             crypto::keygen(role, &out)?;
         }
@@ -77,6 +82,16 @@ async fn run() -> Result<()> {
             program,
             args,
         } => runner::run(&prefix, &program, &args)?,
+        Command::Install {
+            package,
+            repository,
+            trust_root,
+            state,
+            prefix,
+        } => {
+            install::install(&package, &repository, &trust_root, &state, &prefix).await?;
+            println!("Installed {package} into {}", prefix.display());
+        }
         Command::Submit { archive: path } => {
             let package = archive::Package::read(&path)?;
             package.verify(&crypto::trust_dir()?)?;

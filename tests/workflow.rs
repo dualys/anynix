@@ -207,6 +207,11 @@ fn help_describes_commands_and_their_arguments() {
     assert!(pack_help.contains("Developer's Ed25519 private key"));
     let approve_help = run(dir.path(), &["approve", "--help"], true);
     assert!(approve_help.contains("Requested memory"));
+    let install_help = run(dir.path(), &["install", "--help"], true);
+    assert!(install_help.contains("--repository"));
+    assert!(install_help.contains("--trust-root"));
+    assert!(install_help.contains("/apps"));
+    run(dir.path(), &["install", "example"], false);
 }
 
 #[test]

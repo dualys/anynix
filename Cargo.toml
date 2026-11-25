@@ -23,10 +23,11 @@ zstd = "0.13"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tough = "0.24"
+url = "2"
+futures-util = "0.3"
+rustix = { version = "1", features = ["fs", "process"] }
 
 [dev-dependencies]
 aws-lc-rs = "1"
 jiff = "0.2"
-tough = "0.24"
-url = "2"
-futures-util = "0.3"

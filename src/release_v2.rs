@@ -168,7 +168,7 @@ fn blob(digest: &str, size: u64) -> Result<()> {
     Ok(())
 }
 
-fn package(value: &str) -> bool {
+pub(crate) fn package(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && (value.as_bytes()[0].is_ascii_lowercase() || value.as_bytes()[0].is_ascii_digit())
@@ -177,7 +177,7 @@ fn package(value: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._+-".contains(&b))
 }
 
-fn version(value: &str) -> bool {
+pub(crate) fn version(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value != "latest"
@@ -446,11 +446,16 @@ mod tests {
                 }],
             }],
         };
-        let mut envelope = Envelope {
+        let envelope = Envelope {
             source,
             release,
             attestations: Vec::new(),
         };
+        sign_example(envelope)
+    }
+
+    fn sign_example(mut envelope: Envelope) -> (Envelope, BTreeMap<String, BTreeSet<String>>) {
+        envelope.attestations.clear();
         let mut policy = BTreeMap::new();
         for (index, role) in ROLES.iter().enumerate() {
             let key = SigningKey::from_bytes(&[(index + 1) as u8; 32]);
@@ -677,12 +682,41 @@ mod tests {
         .unwrap();
         std::fs::write(&root_path, signed_root.buffer()).unwrap();
 
-        let (envelope, policy) = example();
+        let (mut envelope, _) = example();
+        if let Target::Success { dependencies, .. } = &mut envelope.release.targets[0] {
+            dependencies.push(Dependency {
+                package: "helper".into(),
+                version: "1.0.0".into(),
+            });
+        }
+        let (envelope, policy) = sign_example(envelope);
+        let (mut helper, _) = example();
+        helper.source.package = "helper".into();
+        helper.release.package = "helper".into();
+        if let Target::Success { files, .. } = &mut helper.release.targets[0] {
+            files[0].digest = blake3::hash(b"library").to_hex().to_string();
+            files[0].size = 7;
+            files[0].install_path = "lib/helper".into();
+            files[0].permissions = 0o644;
+        }
+        let (helper, _) = sign_example(helper);
+        let (mut cyclic, _) = example();
+        cyclic.source.package = "cyclic".into();
+        cyclic.release.package = "cyclic".into();
+        if let Target::Success { dependencies, .. } = &mut cyclic.release.targets[0] {
+            dependencies.push(Dependency {
+                package: "cyclic".into(),
+                version: "1.0.0".into(),
+            });
+        }
+        let (cyclic, _) = sign_example(cyclic);
         let blob_dir = base.join("blobs");
         std::fs::create_dir(&blob_dir).unwrap();
         let blob_bytes = b"binary";
         let blob_path = blob_dir.join(blake3::hash(blob_bytes).to_hex().as_str());
         std::fs::write(&blob_path, blob_bytes).unwrap();
+        let helper_blob_path = blob_dir.join(blake3::hash(b"library").to_hex().as_str());
+        std::fs::write(&helper_blob_path, b"library").unwrap();
         let policy_data = serde_json::json!({
             "format": "anynix-attestation-keys-v1",
             "roles": policy
@@ -690,6 +724,18 @@ mod tests {
         let index_data = serde_json::json!({
             "format": "anynix-package-index-v1",
             "package": "example",
+            "latest": "1.0.0",
+            "versions": ["1.0.0"]
+        });
+        let helper_index = serde_json::json!({
+            "format": "anynix-package-index-v1",
+            "package": "helper",
+            "latest": "1.0.0",
+            "versions": ["1.0.0"]
+        });
+        let cyclic_index = serde_json::json!({
+            "format": "anynix-package-index-v1",
+            "package": "cyclic",
             "latest": "1.0.0",
             "versions": ["1.0.0"]
         });
@@ -705,6 +751,22 @@ mod tests {
             (
                 "anynix/releases/example/1.0.0.json",
                 serde_json::to_vec(&envelope).unwrap(),
+            ),
+            (
+                "anynix/packages/helper.json",
+                serde_json::to_vec(&helper_index).unwrap(),
+            ),
+            (
+                "anynix/releases/helper/1.0.0.json",
+                serde_json::to_vec(&helper).unwrap(),
+            ),
+            (
+                "anynix/packages/cyclic.json",
+                serde_json::to_vec(&cyclic_index).unwrap(),
+            ),
+            (
+                "anynix/releases/cyclic/1.0.0.json",
+                serde_json::to_vec(&cyclic).unwrap(),
             ),
         ];
         let mut editor = RepositoryEditor::new(&root_path).await.unwrap();
@@ -752,6 +814,90 @@ mod tests {
         let role_keys = serde_json::from_value(authenticated_policy["roles"].clone()).unwrap();
         let authenticated_release: Envelope = serde_json::from_slice(&authenticated[2]).unwrap();
         authenticated_release.verify_signatures(&role_keys).unwrap();
+        if std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64" {
+            let install_state = base.join("install-state");
+            let prefix = base.join("apps");
+            std::fs::create_dir(&install_state).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&install_state, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            use clap::Parser;
+            let args = [
+                "anynix",
+                "install",
+                "example",
+                "--repository",
+                base.to_str().unwrap(),
+                "--trust-root",
+                root_path.to_str().unwrap(),
+                "--state",
+                install_state.to_str().unwrap(),
+                "--prefix",
+                prefix.to_str().unwrap(),
+            ];
+            let command = crate::cli::Cli::try_parse_from(args).unwrap().command;
+            crate::execute(command).await.unwrap();
+            assert_eq!(
+                std::fs::read(prefix.join("bin/example")).unwrap(),
+                blob_bytes
+            );
+            assert_eq!(
+                std::fs::read(prefix.join("lib/helper")).unwrap(),
+                b"library"
+            );
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(prefix.join("bin/example"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+            assert!(
+                crate::install::install("example@1.0.0", base, &root_path, &install_state, &prefix)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read(prefix.join("bin/example")).unwrap(),
+                blob_bytes
+            );
+            std::fs::write(&blob_path, b"tamper").unwrap();
+            let other_prefix = base.join("other-apps");
+            assert!(
+                crate::install::install("example", base, &root_path, &install_state, &other_prefix)
+                    .await
+                    .is_err()
+            );
+            assert!(!other_prefix.exists());
+            std::fs::write(&blob_path, blob_bytes).unwrap();
+            std::fs::remove_file(targets_dir.join("anynix/releases/helper/1.0.0.json")).unwrap();
+            let missing_prefix = base.join("missing-dependency");
+            assert!(
+                crate::install::install(
+                    "example",
+                    base,
+                    &root_path,
+                    &install_state,
+                    &missing_prefix
+                )
+                .await
+                .is_err()
+            );
+            assert!(!missing_prefix.exists());
+            std::fs::write(targets_dir.join(files[4].0), &files[4].1).unwrap();
+            let cycle_prefix = base.join("cycle");
+            let error =
+                crate::install::install("cyclic", base, &root_path, &install_state, &cycle_prefix)
+                    .await
+                    .unwrap_err();
+            assert!(error.to_string().contains("dependency cycle"));
+            assert!(!cycle_prefix.exists());
+        }
         if let Target::Success { files, .. } = &authenticated_release.release.targets[0] {
             let file = &files[0];
             let blob = Blob {
@@ -781,6 +927,21 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(stream.try_collect::<Vec<_>>().await.is_err());
+        if std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64" {
+            let prefix = base.join("tampered-release");
+            assert!(
+                crate::install::install(
+                    "example",
+                    base,
+                    &root_path,
+                    &base.join("install-state"),
+                    &prefix
+                )
+                .await
+                .is_err()
+            );
+            assert!(!prefix.exists());
+        }
 
         let mut incomplete_root: serde_json::Value = serde_json::from_slice(&root_bytes).unwrap();
         incomplete_root["signatures"]
@@ -829,5 +990,29 @@ mod tests {
         .await
         .unwrap_err();
         assert!(expired.to_string().to_lowercase().contains("expir"));
+        if std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64" {
+            let expired_repo = base.join("expired-repo");
+            std::fs::create_dir(&expired_repo).unwrap();
+            std::fs::rename(&expired_metadata, expired_repo.join("metadata")).unwrap();
+            std::fs::create_dir(expired_repo.join("targets")).unwrap();
+            let expired_state = base.join("expired-state");
+            std::fs::create_dir(&expired_state).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&expired_state, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let prefix = base.join("expired-apps");
+            assert!(
+                crate::install::install(
+                    "example",
+                    &expired_repo,
+                    &root_path,
+                    &expired_state,
+                    &prefix
+                )
+                .await
+                .is_err()
+            );
+            assert!(!prefix.exists());
+        }
     }
 }

@@ -17,10 +17,10 @@ son environnement et ses accès sont ceux de l'utilisateur ; ce n'est pas une
 sandbox. `--prefix /chemin` permet de choisir une autre arborescence et doit
 précéder le nom du programme.
 
-Anynix ne vérifie pas encore la provenance ou l'intégrité de ces exécutables :
+`run` ne vérifie pas lui-même la provenance ou l'intégrité de ces exécutables :
 utilisez uniquement un répertoire et des fichiers de confiance. Les liens
-symboliques ne sont pas acceptés pour `bin` ou le programme. L'installation,
-la gestion des bibliothèques et `run --ephemeral` ne sont pas implémentées.
+symboliques ne sont pas acceptés pour `bin` ou le programme. La configuration
+automatique des bibliothèques et `run --ephemeral` ne sont pas implémentées.
 
 Le module Rust `release_v2` contient les premiers contrôles de schéma,
 canonisation et signatures du format v2. Il ne valide pas TUF, la fraîcheur
@@ -30,8 +30,48 @@ le format source v1, qui ne constitue pas une release v2 publiable.
 Un test génère temporairement une release v2 signée et un dépôt TUF local avec
 une racine de test à quorum 2 sur 3. Il vérifie également les refus en cas
 d'altération ou d'expiration. Ces clés et données sont uniquement destinées
-aux tests ; `install` et la vérification TUF par le client ne sont pas encore
-implémentés.
+aux tests.
+
+## Installer une release locale
+
+`install` utilise un dépôt TUF local et ne contacte aucun serveur. Cette
+implémentation Unix a été testée sur Linux :
+
+```sh
+mkdir -m 700 -p "$HOME/.local/state/anynix/tuf"
+anynix install example@1.0.0 \
+  --repository /chemin/vers/depot \
+  --trust-root /chemin/vers/racine-tuf-verifiee.json \
+  --state "$HOME/.local/state/anynix/tuf"
+```
+
+Sans `@version`, la version `latest` de l'index TUF authentifié est choisie.
+La racine initiale, obtenue et vérifiée indépendamment du dépôt, doit avoir
+trois clés et un seuil de deux signatures. Le répertoire d'état doit être
+privé, appartenir à l'utilisateur exécutant la commande et persister entre
+installations pour détecter les retours arrière. Il est lié à cette racine et
+ne doit pas être partagé entre dépôts distincts. La racine de confiance et
+les répertoires parents du préfixe et de l'état doivent être protégés contre
+les modifications d'autres utilisateurs ; les liens symboliques dans ces
+chemins sont refusés.
+
+Le dépôt contient `metadata/` et `targets/` pour TUF, ainsi que `blobs/` avec
+un fichier nommé par hash BLAKE3 pour chaque fichier à installer. Les cibles
+TUF requises sont la politique de clés `anynix/attestation-keys.json`, les
+index `anynix/packages/<nom>.json` et les releases
+`anynix/releases/<nom>/<version>.json`. Les cibles TUF déléguées ne sont pas
+encore prises en charge. Les archives source de `pack` ne sont pas installables.
+
+Le client vérifie TUF, les cinq signatures, l'index, la cible courante et les
+hashes des fichiers, puis résout les dépendances exactes dans le même dépôt.
+Les chemins sont installés sous `/apps`, ou sous `--prefix /chemin` si indiqué.
+Le préfixe et les répertoires utilisés doivent appartenir à l'utilisateur
+exécutant la commande et ne pas être modifiables par d'autres utilisateurs.
+L'accès à `/apps` peut nécessiter des droits appropriés. Aucun fichier existant
+n'est écrasé : une réinstallation ou une dépendance déjà présente peut donc
+échouer. En cas d'erreur pendant la copie, les fichiers créés sont supprimés
+si possible ; une interruption brutale peut laisser une installation partielle.
+La suppression et le suivi des fichiers installés ne sont pas encore disponibles.
 
 ## Confiance et clés
 

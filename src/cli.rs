@@ -52,6 +52,23 @@ pub enum Command {
         #[arg(short = 'o', long)]
         dest: PathBuf,
     },
+    /// Install a verified release and its dependencies from a local TUF repository
+    Install {
+        /// Package name, optionally followed by @ and an exact version
+        package: String,
+        /// Local repository containing metadata/, targets/ and blobs/
+        #[arg(long)]
+        repository: PathBuf,
+        /// TUF root authenticated independently of the repository
+        #[arg(long)]
+        trust_root: PathBuf,
+        /// Existing private directory for persistent TUF state
+        #[arg(long)]
+        state: PathBuf,
+        /// Application prefix (default: /apps)
+        #[arg(long, default_value = "/apps")]
+        prefix: PathBuf,
+    },
     /// Run a local executable from the application prefix without changing PATH
     Run {
         /// Application prefix containing bin/ (default: /apps)
