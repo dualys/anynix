@@ -27,6 +27,11 @@ canonisation et signatures du format v2. Il ne valide pas TUF, la fraîcheur
 des clés, les blobs distants ni l'exécution réelle des builds. Il n'est pas
 encore relié aux commandes : `pack`, `audit` et `approve` utilisent toujours
 le format source v1, qui ne constitue pas une release v2 publiable.
+Un test génère temporairement une release v2 signée et un dépôt TUF local avec
+une racine de test à quorum 2 sur 3. Il vérifie également les refus en cas
+d'altération ou d'expiration. Ces clés et données sont uniquement destinées
+aux tests ; `install` et la vérification TUF par le client ne sont pas encore
+implémentés.
 
 ## Confiance et clés
 

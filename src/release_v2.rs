@@ -601,4 +601,233 @@ mod tests {
         assert!(reference.verify_content(b"Payload").is_err());
         assert!(reference.verify_content(b"short").is_err());
     }
+
+    #[tokio::test]
+    async fn signed_release_is_authenticated_by_a_local_tuf_repository() {
+        use aws_lc_rs::rand::SystemRandom;
+        use aws_lc_rs::signature::Ed25519KeyPair;
+        use futures_util::TryStreamExt;
+        use jiff::{SignedDuration, Timestamp};
+        use std::{collections::HashMap, num::NonZeroU64};
+        use tough::{
+            RepositoryLoader, TargetName,
+            editor::{RepositoryEditor, signed::SignedRole},
+            key_source::{KeySource, LocalKeySource},
+            schema::{KeyHolder, RoleKeys, RoleType, Root, Target as TufTarget},
+        };
+        use url::Url;
+
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
+        let metadata_dir = base.join("metadata");
+        let targets_dir = base.join("targets");
+        let state_dir = base.join("state");
+        let root_path = base.join("trusted-root.json");
+        std::fs::create_dir_all(&metadata_dir).unwrap();
+        std::fs::create_dir_all(&targets_dir).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let mut keys: Vec<Box<dyn KeySource>> = Vec::new();
+        for index in 0..4 {
+            let key = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+            let path = base.join(format!("test-tuf-key-{index}.der"));
+            std::fs::write(&path, key.as_ref()).unwrap();
+            keys.push(Box::new(LocalKeySource { path }));
+        }
+        let mut public_keys = HashMap::new();
+        let mut key_ids = Vec::new();
+        for key in &keys {
+            let public_key = key.as_sign().await.unwrap().tuf_key();
+            let key_id = public_key.key_id().unwrap();
+            public_keys.insert(key_id.clone(), public_key);
+            key_ids.push(key_id);
+        }
+        let root_keys = RoleKeys {
+            keyids: key_ids[..3].to_vec(),
+            threshold: NonZeroU64::new(2).unwrap(),
+            _extra: Default::default(),
+        };
+        let online_key = RoleKeys {
+            keyids: vec![key_ids[3].clone()],
+            threshold: NonZeroU64::new(1).unwrap(),
+            _extra: Default::default(),
+        };
+        let expires = Timestamp::now() + SignedDuration::from_secs(86_400);
+        let root = Root {
+            spec_version: "1.0.0".into(),
+            consistent_snapshot: false,
+            version: NonZeroU64::new(1).unwrap(),
+            expires,
+            keys: public_keys,
+            roles: HashMap::from([
+                (RoleType::Root, root_keys),
+                (RoleType::Targets, online_key.clone()),
+                (RoleType::Snapshot, online_key.clone()),
+                (RoleType::Timestamp, online_key),
+            ]),
+            _extra: HashMap::new(),
+        };
+        let signed_root = SignedRole::new(
+            root.clone(),
+            &KeyHolder::Root(root),
+            &keys[..2],
+            &SystemRandom::new(),
+        )
+        .await
+        .unwrap();
+        std::fs::write(&root_path, signed_root.buffer()).unwrap();
+
+        let (envelope, policy) = example();
+        let blob_dir = base.join("blobs");
+        std::fs::create_dir(&blob_dir).unwrap();
+        let blob_bytes = b"binary";
+        let blob_path = blob_dir.join(blake3::hash(blob_bytes).to_hex().as_str());
+        std::fs::write(&blob_path, blob_bytes).unwrap();
+        let policy_data = serde_json::json!({
+            "format": "anynix-attestation-keys-v1",
+            "roles": policy
+        });
+        let index_data = serde_json::json!({
+            "format": "anynix-package-index-v1",
+            "package": "example",
+            "latest": "1.0.0",
+            "versions": ["1.0.0"]
+        });
+        let files = [
+            (
+                "anynix/attestation-keys.json",
+                serde_json::to_vec(&policy_data).unwrap(),
+            ),
+            (
+                "anynix/packages/example.json",
+                serde_json::to_vec(&index_data).unwrap(),
+            ),
+            (
+                "anynix/releases/example/1.0.0.json",
+                serde_json::to_vec(&envelope).unwrap(),
+            ),
+        ];
+        let mut editor = RepositoryEditor::new(&root_path).await.unwrap();
+        let version = NonZeroU64::new(1).unwrap();
+        editor.snapshot_version(version).snapshot_expires(expires);
+        editor.timestamp_version(version).timestamp_expires(expires);
+        editor.targets_version(version).unwrap();
+        editor.targets_expires(expires).unwrap();
+        for (name, bytes) in &files {
+            let path = targets_dir.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+            editor
+                .add_target(*name, TufTarget::from_path(&path).await.unwrap())
+                .unwrap();
+        }
+        editor
+            .sign(&keys[3..])
+            .await
+            .unwrap()
+            .write(&metadata_dir)
+            .await
+            .unwrap();
+
+        let root_bytes = std::fs::read(&root_path).unwrap();
+        let metadata_url = Url::from_directory_path(&metadata_dir).unwrap();
+        let targets_url = Url::from_directory_path(&targets_dir).unwrap();
+        let repo = RepositoryLoader::new(&root_bytes, metadata_url.clone(), targets_url.clone())
+            .datastore(&state_dir)
+            .load()
+            .await
+            .unwrap();
+        let mut authenticated = Vec::new();
+        for (name, _) in &files {
+            let stream = repo
+                .read_target(&TargetName::new(*name).unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            let chunks: Vec<_> = stream.try_collect().await.unwrap();
+            authenticated.push(chunks.into_iter().flatten().collect::<Vec<_>>());
+        }
+        let authenticated_policy: serde_json::Value =
+            serde_json::from_slice(&authenticated[0]).unwrap();
+        let role_keys = serde_json::from_value(authenticated_policy["roles"].clone()).unwrap();
+        let authenticated_release: Envelope = serde_json::from_slice(&authenticated[2]).unwrap();
+        authenticated_release.verify_signatures(&role_keys).unwrap();
+        if let Target::Success { files, .. } = &authenticated_release.release.targets[0] {
+            let file = &files[0];
+            let blob = Blob {
+                digest: file.digest.clone(),
+                size: file.size,
+            };
+            blob.verify_content(&std::fs::read(&blob_path).unwrap())
+                .unwrap();
+            std::fs::write(&blob_path, b"tamper").unwrap();
+            assert!(
+                blob.verify_content(&std::fs::read(&blob_path).unwrap())
+                    .is_err()
+            );
+        } else {
+            panic!("test release target must succeed");
+        }
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&authenticated[1]).unwrap(),
+            index_data
+        );
+
+        let release_path = targets_dir.join(files[2].0);
+        std::fs::write(&release_path, b"tampered").unwrap();
+        let stream = repo
+            .read_target(&TargetName::new(files[2].0).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stream.try_collect::<Vec<_>>().await.is_err());
+
+        let mut incomplete_root: serde_json::Value = serde_json::from_slice(&root_bytes).unwrap();
+        incomplete_root["signatures"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        let bad_root = serde_json::to_vec(&incomplete_root).unwrap();
+        assert!(
+            RepositoryLoader::new(&bad_root, metadata_url, targets_url)
+                .load()
+                .await
+                .is_err()
+        );
+
+        let expired_metadata = base.join("expired-metadata");
+        std::fs::create_dir(&expired_metadata).unwrap();
+        let mut expired_editor = RepositoryEditor::new(&root_path).await.unwrap();
+        expired_editor
+            .snapshot_version(version)
+            .snapshot_expires(expires);
+        expired_editor
+            .timestamp_version(version)
+            .timestamp_expires(Timestamp::now() - SignedDuration::from_secs(60));
+        expired_editor.targets_version(version).unwrap();
+        expired_editor.targets_expires(expires).unwrap();
+        for (name, bytes) in &files {
+            let path = targets_dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            expired_editor
+                .add_target(*name, TufTarget::from_path(&path).await.unwrap())
+                .unwrap();
+        }
+        expired_editor
+            .sign(&keys[3..])
+            .await
+            .unwrap()
+            .write(&expired_metadata)
+            .await
+            .unwrap();
+        let expired = RepositoryLoader::new(
+            &root_bytes,
+            Url::from_directory_path(&expired_metadata).unwrap(),
+            Url::from_directory_path(&targets_dir).unwrap(),
+        )
+        .load()
+        .await
+        .unwrap_err();
+        assert!(expired.to_string().to_lowercase().contains("expir"));
+    }
 }
