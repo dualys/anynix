@@ -22,11 +22,13 @@ tar = "0.4"
 zstd = "0.13"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 tough = "0.24"
 url = "2"
 futures-util = "0.3"
 rustix = { version = "1", features = ["fs", "process"] }
+axum = "0.8"
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
 aws-lc-rs = "1"

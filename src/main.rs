@@ -2,14 +2,17 @@ mod archive;
 pub mod builder;
 mod cli;
 mod crypto;
+mod git_update;
 mod install;
 mod proxmox;
 pub mod release_v2;
+mod review_client;
+mod review_server;
 mod runner;
 
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
-use cli::{Cli, Command};
+use cli::{Cli, Command, ReviewCommand};
 use crypto::{Decision, Role};
 
 #[tokio::main]
@@ -42,6 +45,56 @@ pub(crate) async fn execute(command: Command) -> Result<()> {
             let output = output.unwrap_or_else(|| "package.anynix".into());
             archive::pack(&path, script.as_deref(), &key, &output)?;
             println!("Packed and signed by Developer: {}", output.display());
+        }
+        Command::Update {
+            archive,
+            repository,
+            branch,
+            key,
+            output,
+        } => {
+            let key = match key {
+                Some(key) => key,
+                None => crypto::developer_key_path()?,
+            };
+            let commit = git_update::update(
+                &archive,
+                repository.as_deref(),
+                branch.as_deref(),
+                &key,
+                &output,
+            )?;
+            println!(
+                "Updated from commit {commit}, signed by Developer: {}",
+                output.display()
+            );
+        }
+        Command::Diff { archive, path } => {
+            let package = archive::Package::read(&archive)?;
+            package.verify(&crypto::trust_dir()?)?;
+            let temporary = tempfile::tempdir()?;
+            let archived = temporary.path().join("archive");
+            let local = temporary.path().join("local");
+            package.unpack(&archived)?;
+            archive::snapshot_for_diff(&path, &local)?;
+            let status = std::process::Command::new("git")
+                .args([
+                    "--no-pager",
+                    "diff",
+                    "--no-index",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--",
+                ])
+                .arg(&archived)
+                .arg(&local)
+                .status()
+                .context("running git diff")?;
+            match status.code() {
+                Some(0) => println!("No differences in selected sources."),
+                Some(1) => {}
+                _ => anyhow::bail!("git diff failed: {status}"),
+            }
         }
         Command::Ls { archive: path } => {
             let package = archive::Package::read(&path)?;
@@ -92,12 +145,59 @@ pub(crate) async fn execute(command: Command) -> Result<()> {
             install::install(&package, &repository, &trust_root, &state, &prefix).await?;
             println!("Installed {package} into {}", prefix.display());
         }
-        Command::Submit { archive: path } => {
+        Command::Submit {
+            archive: path,
+            server,
+            correction_of,
+        } => {
             let package = archive::Package::read(&path)?;
             package.verify(&crypto::trust_dir()?)?;
             package.ensure_stage(Role::Developer)?;
-            println!("Submission for review prepared locally; no network request was made.");
+            if let Some(server) = server {
+                review_client::submit(&server, &path, correction_of).await?;
+            } else {
+                ensure!(correction_of.is_none(), "--correction-of requires --server");
+                println!("Submission for review prepared locally; no network request was made.");
+            }
         }
+        Command::Review { command } => match command {
+            ReviewCommand::Serve {
+                config,
+                database,
+                listen,
+            } => {
+                review_server::serve(&config, &database, listen).await?;
+            }
+            ReviewCommand::TokenHash => {
+                println!("{}", crypto::hash(review_client::token()?.as_bytes()));
+            }
+            ReviewCommand::List { server } => {
+                review_client::list(&server).await?;
+            }
+            ReviewCommand::Get {
+                id,
+                server,
+                original,
+                reviewer,
+                output,
+            } => {
+                review_client::get(&server, id, original, reviewer, &output).await?;
+            }
+            ReviewCommand::Send {
+                id,
+                archive: path,
+                server,
+            } => {
+                let package = archive::Package::read(&path)?;
+                package.verify(&crypto::trust_dir()?)?;
+                let manager = match package.manifest.attestations.as_slice() {
+                    [_, reviewer] if reviewer.role == Role::Reviewer => false,
+                    [_, _, manager] if manager.role == Role::Manager => true,
+                    _ => anyhow::bail!("expected a Reviewer or Manager decision"),
+                };
+                review_client::send(&server, id, &path, manager).await?;
+            }
+        },
         Command::Audit { archive: path, key } => {
             let mut package = archive::Package::read(&path)?;
             let trust = crypto::trust_dir()?;
@@ -130,6 +230,7 @@ pub(crate) async fn execute(command: Command) -> Result<()> {
         Command::Approve {
             archive: path,
             key,
+            review_only,
             cpu,
             thread,
             memory,
@@ -141,6 +242,10 @@ pub(crate) async fn execute(command: Command) -> Result<()> {
             package.ensure_stage(Role::Reviewer)?;
             package.attest(Role::Manager, Decision::Approve, None, &key, &trust)?;
             package.write_replace(&path)?;
+            if review_only {
+                println!("Manager approved; no build was started.");
+                return Ok(());
+            }
             proxmox::submit(&resources)
                 .await
                 .context("Proxmox orchestration")?;

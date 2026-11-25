@@ -154,8 +154,43 @@ anynix reject package.anynix --reason "Corrections requises" --key reviewer.key
 
 La décision et le motif sont signés. Un paquet rejeté ne peut être soumis,
 approuvé ou extrait ; le développeur crée un nouveau paquet corrigé, le soumet
-à nouveau, et le reviewer le réexamine. Il n'existe pas encore de suivi
-automatique reliant les versions ni d'envoi réseau du rapport.
+à nouveau, et le reviewer le réexamine. Sans option `--server`, `submit`
+ne fait qu'une vérification locale et n'envoie rien.
+
+Pour comparer les sources d'une archive signée, y compris rejetée, avec le
+répertoire local :
+
+```sh
+anynix diff package.anynix .
+```
+
+Le répertoire local doit contenir `anynix.yaml` ; seules les sources
+sélectionnées par ce fichier et ses règles d'exclusion sont comparées. Le
+script inclus séparément dans l'archive n'est pas comparé, sauf s'il fait
+également partie des sources sélectionnées. La commande exige Git.
+
+Après avoir poussé les corrections vers le dépôt Git distant :
+
+```sh
+anynix update package.anynix -o corrected.anynix
+anynix submit corrected.anynix
+```
+
+`update` utilise par défaut `origin` du dépôt courant et la branche par défaut
+du serveur ; `--repository` et `--branch` permettent de les préciser. Il clone
+le dépôt dans un répertoire temporaire, prend uniquement les fichiers du commit
+récupéré, applique le `anynix.yaml` de ce commit et affiche son identifiant.
+Les modifications locales non commitées ne sont pas incluses. Les liens,
+fichiers spéciaux et sous-modules ne sont pas pris en charge. La clé Developer
+utilisée doit être la même que celle de l'archive précédente et être approuvée
+localement ; `--key` permet de la préciser. Le commit et l'origine affichés ne
+constituent pas une preuve d'origine Git et ne sont pas enregistrés dans le
+manifeste signé.
+
+Cette commande crée une nouvelle archive avec les seules sources mises à jour
+et une nouvelle signature Developer ; elle conserve l'ancienne archive intacte
+et refuse d'écraser la destination. Elle ne transmet rien : le lien de correction
+est créé par `submit --server ... --correction-of ...` décrit ci-dessous.
 
 `audit` vérifie les signatures, les clés approuvées, l'intégrité et la
 structure du payload ; il n'exécute pas le script et ne remplace pas une revue
@@ -163,6 +198,113 @@ humaine. `unpack` vérifie les signatures existantes mais **n'exige pas** que le
 paquet ait atteint le statut ReleaseAuthority. Il crée une nouvelle destination
 et refuse les liens et fichiers spéciaux. Utilisez un répertoire parent de
 destination contrôlé par l'utilisateur.
+
+## Service privé de revue
+
+Le service est un processus distinct du registre public. Il conserve en SQLite
+les soumissions, les décisions signées, les motifs et les liens de correction,
+même après redémarrage. **Tous les comptes authentifiés peuvent consulter
+toutes les soumissions et tous les motifs**, y compris ceux des autres
+développeurs. Seul un Developer peut soumettre ou corriger ses propres
+soumissions refusées ; seul un Reviewer peut approuver ou refuser une
+soumission en attente ; seul un Manager peut signer une soumission approuvée
+par un Reviewer. L'administration des comptes est manuelle.
+
+Chaque compte utilise un jeton distinct et chaque signataire une clé Ed25519
+distincte. Le service vérifie que la clé de signature correspond au compte
+authentifié et que chaque décision porte sur l'archive précédente. Les clés et
+les jetons sont chargés au démarrage ; redémarrer le service après modification
+de sa configuration. Ne réutilisez pas un identifiant de compte pour une autre
+personne. La vérification locale des commandes utilise toujours
+`ANYNIX_TRUST_DIR` : lorsqu'il y a plusieurs développeurs ou reviewers, choisir
+un répertoire de confiance contenant les clés des signataires de l'archive.
+
+Pour créer un jeton individuel dans fish, sur la machine de son titulaire :
+
+```fish
+set -gx ANYNIX_REVIEW_TOKEN (openssl rand -hex 32)
+anynix review token-hash
+```
+
+Le titulaire conserve le jeton secret et transmet uniquement le hash affiché à
+l'administrateur par un canal fiable. N'utilisez pas les exemples ci-dessous
+comme de vrais jetons. L'administrateur crée un fichier JSON privé, avec un
+compte par personne et les clés publiques préalablement vérifiées :
+
+```json
+{
+  "accounts": [
+    {"id": "alice", "role": "Developer", "token_hash": "<hash-alice>", "public_key": "/chemin/alice.pub.pem"},
+    {"id": "reviewer", "role": "Reviewer", "token_hash": "<hash-reviewer>", "public_key": "/chemin/reviewer.pub.pem"},
+    {"id": "manager", "role": "Manager", "token_hash": "<hash-manager>", "public_key": "/chemin/manager.pub.pem"}
+  ]
+}
+```
+
+Chaque hash doit comporter 64 caractères hexadécimaux minuscules. Protégez le
+fichier de configuration, le répertoire de la base, leurs parents et les
+sauvegardes ; le service exige un fichier de configuration privé et un
+répertoire de base privé appartenant à son utilisateur :
+
+```sh
+mkdir -m 700 -p /chemin/prive
+chmod 600 /chemin/prive/review.json
+anynix review serve --config /chemin/prive/review.json \
+  --database /chemin/prive/review.sqlite
+```
+
+Le service écoute uniquement sur l'interface locale, par défaut
+`127.0.0.1:3456`. Pour y accéder depuis une autre machine, utilisez un tunnel
+SSH ou un proxy HTTPS privé correctement configuré ; ne publiez pas le port
+HTTP directement. Le client accepte HTTP uniquement pour une adresse loopback
+numérique et exige HTTPS ailleurs, sans suivre les redirections.
+
+Exemple de parcours (chaque participant utilise son propre jeton et ses clés) :
+
+```sh
+# Developer : première soumission
+anynix submit package.anynix --server http://127.0.0.1:3456
+
+# Tous les comptes authentifiés peuvent consulter l'historique
+anynix review list --server http://127.0.0.1:3456
+
+# Reviewer : récupérer, examiner, puis approuver OU refuser
+anynix review get 1 --server http://127.0.0.1:3456 -o review.anynix
+anynix diff review.anynix /chemin/vers/sources
+anynix audit review.anynix --key reviewer.key
+# ou : anynix reject review.anynix --reason "Corrections requises" --key reviewer.key
+anynix review send 1 review.anynix --server http://127.0.0.1:3456
+
+# Developer, après refus : créer et transmettre une correction liée
+anynix review get 1 --server http://127.0.0.1:3456 -o rejected.anynix
+anynix update rejected.anynix -o corrected.anynix
+anynix submit corrected.anynix --server http://127.0.0.1:3456 --correction-of 1
+
+# Manager, après approbation du Reviewer : récupérer et signer
+anynix review get 2 --server http://127.0.0.1:3456 -o manager.anynix
+anynix approve manager.anynix --key manager.key --review-only
+anynix review send 2 manager.anynix --server http://127.0.0.1:3456
+```
+
+Les identifiants `1` et `2` sont des exemples : utilisez ceux renvoyés par le
+service et faites examiner la correction avant l'étape Manager. `review get`
+télécharge le dernier état ; `--original` récupère l'archive Developer initiale
+et `--reviewer` la décision Reviewer même après l'approbation Manager. Les
+fichiers téléchargés ne remplacent jamais un fichier existant et doivent être
+vérifiés avec `ls`, `audit` ou `approve` avant utilisation.
+
+La transmission est disponible par consultation du service, sans notification
+automatique. Aucun build ni aucune publication n'est lancé par le service.
+Les attestations source v1 ne lient pas leur signature à l'identifiant de
+soumission ; une même décision signée peut donc être réutilisée pour des
+soumissions au contenu identique par le même signataire authentifié. Le service
+ne prouve pas non plus qu'une correction concerne le même paquet : le format
+source v1 ne signe ni nom ni version de paquet. L'administrateur doit assurer
+la séparation des personnes et des rôles. Le service ne fournit pas encore de
+rotation automatisée, de quotas, de limitation de
+débit, de sauvegardes ni de protection contre le rollback de sa base. Ne
+l'exposez pas en production sans revue de sécurité et mesures d'exploitation
+complémentaires.
 
 ## Format et limites
 

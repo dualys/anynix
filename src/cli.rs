@@ -39,6 +39,31 @@ pub enum Command {
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
     },
+    /// Create a new Developer-signed archive from a remote Git repository
+    Update {
+        /// Previous signed archive; it is never modified
+        archive: PathBuf,
+        /// Git repository URL or local path (default: origin of the current repository)
+        #[arg(long)]
+        repository: Option<String>,
+        /// Remote branch to use (default: the remote's default branch)
+        #[arg(long)]
+        branch: Option<String>,
+        /// Developer's Ed25519 private key
+        #[arg(long)]
+        key: Option<PathBuf>,
+        /// New archive; must not already exist
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+    },
+    /// Compare a verified archive's selected sources with a local source tree
+    Diff {
+        /// Signed source archive to compare
+        archive: PathBuf,
+        /// Local source directory containing anynix.yaml
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Show archive hashes and verify the attestation chain against trusted keys
     Ls {
         /// Archive to inspect
@@ -80,10 +105,21 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
     },
-    /// Verify and prepare a submission locally; network transfer is not implemented
+    /// Verify a submission and optionally send it to the private review service
     Submit {
         /// Developer-signed archive
         archive: PathBuf,
+        /// Private review service URL; omit for local verification only
+        #[arg(long)]
+        server: Option<String>,
+        /// ID of a rejected submission being corrected
+        #[arg(long)]
+        correction_of: Option<i64>,
+    },
+    /// Run or use the private review service
+    Review {
+        #[command(subcommand)]
+        command: ReviewCommand,
     },
     /// Validate the payload structure and add a Reviewer signature
     Audit {
@@ -111,6 +147,9 @@ pub enum Command {
         /// Manager's trusted Ed25519 private key
         #[arg(long)]
         key: PathBuf,
+        /// Record the Manager signature without attempting a build
+        #[arg(long)]
+        review_only: bool,
         /// Requested number of CPUs
         #[arg(long, default_value_t = 1)]
         cpu: u8,
@@ -125,5 +164,56 @@ pub enum Command {
     Ssh {
         /// Name of the ephemeral build VM
         temp_name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ReviewCommand {
+    /// Run the private review service on a loopback address
+    Serve {
+        /// Private JSON account configuration
+        #[arg(long)]
+        config: PathBuf,
+        /// SQLite database in an existing private directory
+        #[arg(long)]
+        database: PathBuf,
+        /// Loopback listen address
+        #[arg(long, default_value = "127.0.0.1:3456")]
+        listen: std::net::SocketAddr,
+    },
+    /// Print the hash of ANYNIX_REVIEW_TOKEN for the service configuration
+    TokenHash,
+    /// List submissions visible to the authenticated user
+    List {
+        /// Private review service URL
+        #[arg(long)]
+        server: String,
+    },
+    /// Download a submission or its signed review decision
+    Get {
+        /// Submission identifier
+        id: i64,
+        /// Private review service URL
+        #[arg(long)]
+        server: String,
+        /// Download the original Developer-signed archive
+        #[arg(long, conflicts_with = "reviewer")]
+        original: bool,
+        /// Download the signed Reviewer decision, even after Manager approval
+        #[arg(long)]
+        reviewer: bool,
+        /// Destination; must not already exist
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+    },
+    /// Send a locally signed Reviewer or Manager decision to the private service
+    Send {
+        /// Submission identifier
+        id: i64,
+        /// Archive signed by the Reviewer or Manager
+        archive: PathBuf,
+        /// Private review service URL
+        #[arg(long)]
+        server: String,
     },
 }

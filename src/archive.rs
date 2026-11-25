@@ -109,7 +109,8 @@ fn source_dir<W: Write>(
     builder: &mut tar::Builder<W>,
     root: &Path,
     patterns: &GlobSet,
-    key_path: &Path,
+    key_path: Option<&Path>,
+    require_selected: bool,
 ) -> Result<()> {
     let mut walker = WalkBuilder::new(root);
     walker
@@ -139,7 +140,9 @@ fn source_dir<W: Write>(
             continue;
         }
         let metadata = fs::symlink_metadata(entry.path())?;
-        if metadata.is_file() {
+        if metadata.is_file()
+            && let Some(key_path) = key_path
+        {
             ensure!(
                 !same_file(entry.path(), key_path)?,
                 "refusing to include the private signing key in the payload: {}",
@@ -185,10 +188,12 @@ fn source_dir<W: Write>(
             );
         }
     }
-    ensure!(
-        selected > 0,
-        "include patterns selected no files or directories"
-    );
+    if require_selected {
+        ensure!(
+            selected > 0,
+            "include patterns selected no files or directories"
+        );
+    }
     Ok(())
 }
 
@@ -225,7 +230,7 @@ pub fn pack(path: &Path, script_path: Option<&Path>, key_path: &Path, output: &P
     std::str::from_utf8(&script).context("build script must be UTF-8")?;
     let encoder = zstd::Encoder::new(Vec::new(), 3)?;
     let mut builder = tar::Builder::new(encoder);
-    source_dir(&mut builder, path, &patterns, key_path)?;
+    source_dir(&mut builder, path, &patterns, Some(key_path), true)?;
     let payload = builder.into_inner()?.finish()?;
     ensure!(
         payload.len() as u64 <= MAX_COMPRESSED,
@@ -248,6 +253,25 @@ pub fn pack(path: &Path, script_path: Option<&Path>, key_path: &Path, output: &P
         manifest,
     }
     .write(output, false)
+}
+
+pub fn snapshot_for_diff(path: &Path, dest: &Path) -> Result<()> {
+    ensure!(
+        fs::symlink_metadata(path)?.is_dir(),
+        "source must be a directory, not a symlink"
+    );
+    let (patterns, _) = selection(path)?;
+    let encoder = zstd::Encoder::new(Vec::new(), 3)?;
+    let mut builder = tar::Builder::new(encoder);
+    source_dir(&mut builder, path, &patterns, None, false)?;
+    let payload = builder.into_inner()?.finish()?;
+    ensure!(
+        payload.len() as u64 <= MAX_COMPRESSED,
+        "compressed payload too large"
+    );
+    let expanded = decompress(&payload, MAX_EXPANDED)?;
+    fs::create_dir(dest)?;
+    validate_payload(&expanded, Some(dest))
 }
 
 impl Package {
@@ -400,7 +424,7 @@ impl Package {
     }
 }
 
-fn validate_payload(expanded: &[u8], dest: Option<&Path>) -> Result<()> {
+pub(crate) fn validate_payload(expanded: &[u8], dest: Option<&Path>) -> Result<()> {
     let mut archive = tar::Archive::new(Cursor::new(expanded));
     let mut seen = std::collections::BTreeSet::<PathBuf>::new();
     let mut files = std::collections::BTreeSet::<PathBuf>::new();
