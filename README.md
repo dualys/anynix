@@ -3,6 +3,14 @@
 
 CLI Rust de conditionnement et de vérification d'attestations Ed25519/BLAKE3.
 
+Le contrat provisoire du futur registre Rails est décrit dans [API.md](API.md).
+
+Le module Rust `release_v2` contient les premiers contrôles de schéma,
+canonisation et signatures du format v2. Il ne valide pas TUF, la fraîcheur
+des clés, les blobs distants ni l'exécution réelle des builds. Il n'est pas
+encore relié aux commandes : `pack`, `audit` et `approve` utilisent toujours
+le format source v1, qui ne constitue pas une release v2 publiable.
+
 ## Confiance et clés
 
 Chaque rôle possède une clé publique approuvée localement. Le répertoire est
@@ -33,6 +41,21 @@ En production, chaque rôle conserve sa propre clé privée séparément et les
 clés publiques sont distribuées et vérifiées indépendamment.
 
 ## Parcours
+
+Avant `pack`, créez `anynix.yaml` dans le répertoire source :
+
+```yaml
+include:
+  - "src/**"
+  - "README.md"
+```
+
+La liste est obligatoire. Les chemins et motifs glob sont relatifs au
+répertoire source ; un répertoire sélectionné inclut son contenu. Les fichiers
+exclus par `.ignore` ou `.gitignore` ne sont pas inclus, même s'ils
+correspondent à un motif. Le répertoire `.git` est toujours exclu. Seuls les
+fichiers et répertoires sont acceptés ; les liens et fichiers spéciaux sont
+refusés. Le fichier `anynix.yaml` lui-même n'est inclus que s'il est sélectionné.
 
 ```sh
 anynix pack ./source --script ./build.script --key developer.key -o package.anynix

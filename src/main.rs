@@ -3,6 +3,7 @@ pub mod builder;
 mod cli;
 mod crypto;
 mod proxmox;
+pub mod release_v2;
 
 use anyhow::{Context, Result, ensure};
 use clap::Parser;

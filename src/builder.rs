@@ -6,11 +6,17 @@ pub enum TargetOs {
     FreeBsd,
     OpenBsd,
     Haiku,
+    Dragonfly,
+    NetBsd,
 }
 
 pub fn substitute(script: &str, target: TargetOs) -> String {
     let (prefix, bin, lib, etc) = match target {
-        TargetOs::Linux | TargetOs::FreeBsd | TargetOs::OpenBsd => (
+        TargetOs::Linux
+        | TargetOs::FreeBsd
+        | TargetOs::OpenBsd
+        | TargetOs::Dragonfly
+        | TargetOs::NetBsd => (
             "/usr/local",
             "/usr/local/bin",
             "/usr/local/lib",

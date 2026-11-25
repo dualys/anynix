@@ -1,5 +1,8 @@
 use crate::crypto::{self, Decision, Manifest, Role};
 use anyhow::{Context, Result, bail, ensure};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use ignore::WalkBuilder;
+use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     fs::{self, File},
@@ -49,13 +52,76 @@ fn append_file<W: Write>(
     Ok(())
 }
 
-fn source_dir<W: Write>(builder: &mut tar::Builder<W>, root: &Path, relative: &Path) -> Result<()> {
-    let dir = root.join(relative);
-    let mut entries = fs::read_dir(&dir)?.collect::<std::io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|e| e.file_name());
-    for entry in entries {
-        let rel = relative.join(entry.file_name());
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Selection {
+    include: Vec<String>,
+}
+
+fn selection(root: &Path) -> Result<GlobSet> {
+    let path = root.join("anynix.yaml");
+    let bytes = read_limited(
+        File::open(&path).with_context(|| format!("opening required {}", path.display()))?,
+        MAX_MANIFEST,
+    )?;
+    let config: Selection = serde_yaml_ng::from_slice(&bytes).context("invalid anynix.yaml")?;
+    ensure!(
+        !config.include.is_empty(),
+        "anynix.yaml include must not be empty"
+    );
+    let mut patterns = GlobSetBuilder::new();
+    for pattern in config.include {
+        ensure!(
+            !pattern.is_empty()
+                && Path::new(&pattern)
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_))),
+            "include pattern must be a relative path without . or ..: {pattern}"
+        );
+        patterns.add(
+            GlobBuilder::new(&pattern)
+                .literal_separator(true)
+                .build()
+                .with_context(|| format!("invalid include pattern: {pattern}"))?,
+        );
+    }
+    Ok(patterns.build()?)
+}
+
+fn source_dir<W: Write>(
+    builder: &mut tar::Builder<W>,
+    root: &Path,
+    patterns: &GlobSet,
+) -> Result<()> {
+    let mut walker = WalkBuilder::new(root);
+    walker
+        .hidden(false)
+        .parents(false)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(false)
+        .require_git(false)
+        .follow_links(false)
+        .sort_by_file_path(|a, b| a.cmp(b))
+        .filter_entry(|entry| entry.depth() == 0 || entry.file_name() != ".git");
+    let mut selected = 0usize;
+    for entry in walker.build() {
+        let entry = entry.context("walking source directory")?;
+        if let Some(error) = entry.error() {
+            bail!("invalid ignore rules: {error}");
+        }
+        if entry.depth() == 0 {
+            continue;
+        }
+        let rel = entry.path().strip_prefix(root)?;
+        if !rel
+            .ancestors()
+            .any(|path| !path.as_os_str().is_empty() && patterns.is_match(path))
+        {
+            continue;
+        }
         let metadata = fs::symlink_metadata(entry.path())?;
+        selected += 1;
         if metadata.is_dir() {
             let mut header = tar::Header::new_gnu();
             header.set_entry_type(tar::EntryType::Directory);
@@ -65,8 +131,7 @@ fn source_dir<W: Write>(builder: &mut tar::Builder<W>, root: &Path, relative: &P
             header.set_gid(0);
             header.set_mtime(0);
             header.set_cksum();
-            builder.append_data(&mut header, &rel, std::io::empty())?;
-            source_dir(builder, root, &rel)?;
+            builder.append_data(&mut header, rel, std::io::empty())?;
         } else if metadata.is_file() {
             ensure!(
                 metadata.len() <= MAX_EXPANDED,
@@ -87,7 +152,7 @@ fn source_dir<W: Write>(builder: &mut tar::Builder<W>, root: &Path, relative: &P
             header.set_gid(0);
             header.set_mtime(0);
             header.set_cksum();
-            builder.append_data(&mut header, &rel, File::open(entry.path())?)?;
+            builder.append_data(&mut header, rel, File::open(entry.path())?)?;
         } else {
             bail!(
                 "source contains unsupported link or special file: {}",
@@ -95,6 +160,10 @@ fn source_dir<W: Write>(builder: &mut tar::Builder<W>, root: &Path, relative: &P
             );
         }
     }
+    ensure!(
+        selected > 0,
+        "include patterns selected no files or directories"
+    );
     Ok(())
 }
 
@@ -103,11 +172,12 @@ pub fn pack(path: &Path, script_path: &Path, key_path: &Path, output: &Path) -> 
         fs::symlink_metadata(path)?.is_dir(),
         "source must be a directory, not a symlink"
     );
+    let patterns = selection(path)?;
     let script = read_limited(File::open(script_path)?, MAX_SCRIPT)?;
     std::str::from_utf8(&script).context("build script must be UTF-8")?;
     let encoder = zstd::Encoder::new(Vec::new(), 3)?;
     let mut builder = tar::Builder::new(encoder);
-    source_dir(&mut builder, path, Path::new(""))?;
+    source_dir(&mut builder, path, &patterns)?;
     let payload = builder.into_inner()?.finish()?;
     ensure!(
         payload.len() as u64 <= MAX_COMPRESSED,

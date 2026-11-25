@@ -84,7 +84,7 @@ pub fn hash(data: &[u8]) -> String {
     blake3::hash(data).to_hex().to_string()
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8] = b"0123456789abcdef";
     let mut result = String::with_capacity(bytes.len() * 2);
     for &byte in bytes {
@@ -94,7 +94,7 @@ fn hex(bytes: &[u8]) -> String {
     result
 }
 
-fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N]> {
+pub(crate) fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N]> {
     ensure!(
         value.len() == N * 2
             && value

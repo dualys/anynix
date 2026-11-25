@@ -55,12 +55,76 @@ fn run(root: &Path, args: &[&str], success: bool) -> String {
 }
 
 #[test]
+fn help_describes_commands_and_their_arguments() {
+    let dir = tempfile::tempdir().unwrap();
+    let help = run(dir.path(), &["--help"], true);
+    assert!(help.contains("Package files selected by anynix.yaml and sign them as Developer"));
+    assert!(help.contains("network transfer is not implemented"));
+    let pack_help = run(dir.path(), &["pack", "--help"], true);
+    assert!(pack_help.contains("Source directory to freeze into the archive"));
+    assert!(pack_help.contains("Developer's Ed25519 private key"));
+    let approve_help = run(dir.path(), &["approve", "--help"], true);
+    assert!(approve_help.contains("Requested memory"));
+}
+
+#[test]
+fn pack_uses_yaml_selection_and_ignore_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("trust")).unwrap();
+    fs::create_dir_all(root.join("source/src")).unwrap();
+    fs::write(root.join("build.script"), b"true\n").unwrap();
+    run(
+        root,
+        &["keygen", "--role", "developer", "--out", "developer"],
+        true,
+    );
+    fs::copy(
+        root.join("developer.pub.pem"),
+        root.join("trust/developer.pem"),
+    )
+    .unwrap();
+    let pack_args = [
+        "pack",
+        "source",
+        "--script",
+        "build.script",
+        "--key",
+        "developer",
+        "-o",
+        "package.anynix",
+    ];
+    run(root, &pack_args, false);
+    assert!(!root.join("package.anynix").exists());
+    fs::write(
+        root.join("source/anynix.yaml"),
+        "include:\n  - 'src/**'\n  - README.md\n",
+    )
+    .unwrap();
+    fs::write(root.join("source/.ignore"), "src/skip-ignore\n").unwrap();
+    fs::write(root.join("source/.gitignore"), "src/skip-git\n").unwrap();
+    fs::write(root.join("source/src/ok"), b"selected").unwrap();
+    fs::write(root.join("source/src/skip-ignore"), b"ignored").unwrap();
+    fs::write(root.join("source/src/skip-git"), b"ignored").unwrap();
+    fs::write(root.join("source/README.md"), b"readme").unwrap();
+    fs::write(root.join("source/secret"), b"not selected").unwrap();
+    run(root, &pack_args, true);
+    run(root, &["unpack", "package.anynix", "-o", "out"], true);
+    assert_eq!(fs::read(root.join("out/src/ok")).unwrap(), b"selected");
+    assert_eq!(fs::read(root.join("out/README.md")).unwrap(), b"readme");
+    assert!(!root.join("out/src/skip-ignore").exists());
+    assert!(!root.join("out/src/skip-git").exists());
+    assert!(!root.join("out/secret").exists());
+}
+
+#[test]
 fn approved_and_rejected_workflows() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     fs::create_dir(root.join("trust")).unwrap();
     fs::create_dir(root.join("source")).unwrap();
     fs::write(root.join("source/file"), b"frozen source").unwrap();
+    fs::write(root.join("source/anynix.yaml"), "include:\n  - file\n").unwrap();
     fs::write(root.join("build.script"), b"cp file %bin%/file\n").unwrap();
     for role in ["developer", "reviewer", "manager"] {
         run(root, &["keygen", "--role", role, "--out", role], true);
