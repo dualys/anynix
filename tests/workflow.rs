@@ -36,6 +36,7 @@ fn write_members(path: &Path, entries: &BTreeMap<String, Vec<u8>>) {
 fn run(root: &Path, args: &[&str], success: bool) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_anynix"))
         .current_dir(root)
+        .env("HOME", root)
         .env("ANYNIX_TRUST_DIR", root.join("trust"))
         .args(args)
         .output()
@@ -52,6 +53,100 @@ fn run(root: &Path, args: &[&str], success: bool) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+#[test]
+fn pack_defaults_and_explicit_overrides() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let key_dir = root.join(".config/anynix/keys");
+    fs::create_dir_all(&key_dir).unwrap();
+    let key = key_dir.join("developer.pem");
+    run(
+        root,
+        &[
+            "keygen",
+            "--role",
+            "developer",
+            "--out",
+            key.to_str().unwrap(),
+        ],
+        true,
+    );
+    fs::write(
+        root.join("anynix.yaml"),
+        "build_script: build.script\ninclude:\n  - file\n",
+    )
+    .unwrap();
+    fs::write(root.join("build.script"), b"default script\n").unwrap();
+    fs::write(root.join("file"), b"source").unwrap();
+    run(root, &["pack"], true);
+    assert_eq!(
+        members(&root.join("package.anynix"))["build.script"],
+        b"default script\n"
+    );
+    run(root, &["pack"], false);
+    fs::write(root.join("alternate.script"), b"override script\n").unwrap();
+    run(
+        root,
+        &[
+            "pack",
+            ".",
+            "--script",
+            "alternate.script",
+            "--key",
+            key.to_str().unwrap(),
+            "-o",
+            "override.anynix",
+        ],
+        true,
+    );
+    assert_eq!(
+        members(&root.join("override.anynix"))["build.script"],
+        b"override script\n"
+    );
+
+    fs::create_dir(root.join("project")).unwrap();
+    fs::write(
+        root.join("project/anynix.yaml"),
+        "build_script: build.script\ninclude:\n  - file\n",
+    )
+    .unwrap();
+    fs::write(root.join("project/build.script"), b"project script\n").unwrap();
+    fs::write(root.join("project/file"), b"nested source").unwrap();
+    run(root, &["pack", "project", "-o", "nested.anynix"], true);
+    assert_eq!(
+        members(&root.join("nested.anynix"))["build.script"],
+        b"project script\n"
+    );
+}
+
+#[test]
+fn pack_refuses_private_key_in_payload_or_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("build.script"), b"true\n").unwrap();
+    run(
+        root,
+        &["keygen", "--role", "developer", "--out", "private.key"],
+        true,
+    );
+    fs::write(
+        root.join("anynix.yaml"),
+        "build_script: build.script\ninclude:\n  - private.key\n",
+    )
+    .unwrap();
+    let result = run(root, &["pack", "--key", "private.key"], false);
+    assert!(result.contains("refusing to include the private signing key"));
+    assert!(!root.join("package.anynix").exists());
+    fs::write(
+        root.join("anynix.yaml"),
+        "build_script: private.key\ninclude:\n  - build.script\n",
+    )
+    .unwrap();
+    let result = run(root, &["pack", "--key", "private.key"], false);
+    assert!(result.contains("build script must not be the private signing key"));
+    assert!(!root.join("package.anynix").exists());
 }
 
 #[test]

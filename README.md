@@ -45,6 +45,7 @@ clés publiques sont distribuées et vérifiées indépendamment.
 Avant `pack`, créez `anynix.yaml` dans le répertoire source :
 
 ```yaml
+build_script: "build.script"
 include:
   - "src/**"
   - "README.md"
@@ -56,6 +57,23 @@ exclus par `.ignore` ou `.gitignore` ne sont pas inclus, même s'ils
 correspondent à un motif. Le répertoire `.git` est toujours exclu. Seuls les
 fichiers et répertoires sont acceptés ; les liens et fichiers spéciaux sont
 refusés. Le fichier `anynix.yaml` lui-même n'est inclus que s'il est sélectionné.
+`build_script` est relatif au répertoire source ; son contenu est inclus
+séparément dans l'archive et n'est pas exécuté par `pack`.
+
+Pour utiliser `anynix pack` sans argument, créez une clé personnelle une seule
+fois :
+
+```sh
+mkdir -p "$HOME/.config/anynix/keys"
+anynix keygen --role developer --out "$HOME/.config/anynix/keys/developer.pem"
+```
+
+Depuis le répertoire source, `anynix pack` utilise `anynix.yaml`, la clé
+ci-dessus et crée `package.anynix` dans le répertoire courant. Il refuse
+d'écraser une archive existante. Les options `--script`, `--key`, `-o` et le
+chemin source restent disponibles et remplacent ces valeurs par défaut ; un
+chemin `--script` est relatif au répertoire courant. La clé privée ne doit
+jamais être incluse dans l'archive.
 
 ```sh
 anynix pack ./source --script ./build.script --key developer.key -o package.anynix

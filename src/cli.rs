@@ -26,17 +26,18 @@ pub enum Command {
     },
     /// Package files selected by anynix.yaml and sign them as Developer
     Pack {
-        /// Source directory to freeze into the archive
+        /// Source directory to freeze into the archive (default: current directory)
+        #[arg(default_value = ".")]
         path: PathBuf,
-        /// UTF-8 build script to include
+        /// UTF-8 build script (overrides build_script in anynix.yaml)
         #[arg(long)]
-        script: PathBuf,
-        /// Developer's Ed25519 private key
+        script: Option<PathBuf>,
+        /// Developer's Ed25519 private key (default: ~/.config/anynix/keys/developer.pem)
         #[arg(long)]
-        key: PathBuf,
-        /// Destination .anynix archive; must not already exist
+        key: Option<PathBuf>,
+        /// Destination archive (default: package.anynix); must not already exist
         #[arg(short = 'o', long)]
-        output: PathBuf,
+        output: Option<PathBuf>,
     },
     /// Show archive hashes and verify the attestation chain against trusted keys
     Ls {

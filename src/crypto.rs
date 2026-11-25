@@ -119,6 +119,12 @@ pub fn trust_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".config/anynix/trust"))
 }
 
+pub fn developer_key_path() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .context("HOME is required to locate the default developer key; use --key to select one")?;
+    Ok(PathBuf::from(home).join(".config/anynix/keys/developer.pem"))
+}
+
 fn trusted_key(role: Role, trust: &Path) -> Result<VerifyingKey> {
     let path = trust.join(role.file_name());
     let pem = fs::read_to_string(&path)

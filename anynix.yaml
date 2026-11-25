@@ -1,0 +1,12 @@
+build_script: "build.script"
+include:
+  - "anynix.yaml"
+  - ".gitignore"
+  - "Cargo.toml"
+  - "Cargo.lock"
+  - "README.md"
+  - "API.md"
+  - "help.txt"
+  - "build.script"
+  - "src/**"
+  - "tests/**"

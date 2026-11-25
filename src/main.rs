@@ -29,7 +29,12 @@ async fn run() -> Result<()> {
             key,
             output,
         } => {
-            archive::pack(&path, &script, &key, &output)?;
+            let key = match key {
+                Some(key) => key,
+                None => crypto::developer_key_path()?,
+            };
+            let output = output.unwrap_or_else(|| "package.anynix".into());
+            archive::pack(&path, script.as_deref(), &key, &output)?;
             println!("Packed and signed by Developer: {}", output.display());
         }
         Command::Ls { archive: path } => {

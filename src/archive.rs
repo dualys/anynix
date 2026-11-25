@@ -56,9 +56,10 @@ fn append_file<W: Write>(
 #[serde(deny_unknown_fields)]
 struct Selection {
     include: Vec<String>,
+    build_script: Option<PathBuf>,
 }
 
-fn selection(root: &Path) -> Result<GlobSet> {
+fn selection(root: &Path) -> Result<(GlobSet, Option<PathBuf>)> {
     let path = root.join("anynix.yaml");
     let bytes = read_limited(
         File::open(&path).with_context(|| format!("opening required {}", path.display()))?,
@@ -85,13 +86,30 @@ fn selection(root: &Path) -> Result<GlobSet> {
                 .with_context(|| format!("invalid include pattern: {pattern}"))?,
         );
     }
-    Ok(patterns.build()?)
+    Ok((patterns.build()?, config.build_script))
+}
+
+fn same_file(path: &Path, key_path: &Path) -> Result<bool> {
+    let path_metadata =
+        fs::metadata(path).with_context(|| format!("reading {}", path.display()))?;
+    let key_metadata = fs::metadata(key_path)
+        .with_context(|| format!("reading private key {}", key_path.display()))?;
+    let same_path = fs::canonicalize(path)? == fs::canonicalize(key_path)?;
+    #[cfg(unix)]
+    let same_identity = {
+        use std::os::unix::fs::MetadataExt;
+        path_metadata.dev() == key_metadata.dev() && path_metadata.ino() == key_metadata.ino()
+    };
+    #[cfg(not(unix))]
+    let same_identity = false;
+    Ok(same_path || same_identity)
 }
 
 fn source_dir<W: Write>(
     builder: &mut tar::Builder<W>,
     root: &Path,
     patterns: &GlobSet,
+    key_path: &Path,
 ) -> Result<()> {
     let mut walker = WalkBuilder::new(root);
     walker
@@ -121,6 +139,13 @@ fn source_dir<W: Write>(
             continue;
         }
         let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.is_file() {
+            ensure!(
+                !same_file(entry.path(), key_path)?,
+                "refusing to include the private signing key in the payload: {}",
+                rel.display()
+            );
+        }
         selected += 1;
         if metadata.is_dir() {
             let mut header = tar::Header::new_gnu();
@@ -167,17 +192,40 @@ fn source_dir<W: Write>(
     Ok(())
 }
 
-pub fn pack(path: &Path, script_path: &Path, key_path: &Path, output: &Path) -> Result<()> {
+pub fn pack(path: &Path, script_path: Option<&Path>, key_path: &Path, output: &Path) -> Result<()> {
     ensure!(
         fs::symlink_metadata(path)?.is_dir(),
         "source must be a directory, not a symlink"
     );
-    let patterns = selection(path)?;
-    let script = read_limited(File::open(script_path)?, MAX_SCRIPT)?;
+    let (patterns, configured_script) = selection(path)?;
+    let script_path = match script_path {
+        Some(script) => script.to_path_buf(),
+        None => {
+            let script = configured_script
+                .context("build_script is missing from anynix.yaml; add it or specify --script")?;
+            ensure!(
+                !script.as_os_str().is_empty()
+                    && script
+                        .components()
+                        .all(|c| matches!(c, Component::Normal(_))),
+                "build_script in anynix.yaml must be a relative path without . or .."
+            );
+            path.join(script)
+        }
+    };
+    ensure!(
+        !same_file(&script_path, key_path)?,
+        "build script must not be the private signing key"
+    );
+    let script = read_limited(
+        File::open(&script_path)
+            .with_context(|| format!("opening build script {}", script_path.display()))?,
+        MAX_SCRIPT,
+    )?;
     std::str::from_utf8(&script).context("build script must be UTF-8")?;
     let encoder = zstd::Encoder::new(Vec::new(), 3)?;
     let mut builder = tar::Builder::new(encoder);
-    source_dir(&mut builder, path, &patterns)?;
+    source_dir(&mut builder, path, &patterns, key_path)?;
     let payload = builder.into_inner()?.finish()?;
     ensure!(
         payload.len() as u64 <= MAX_COMPRESSED,

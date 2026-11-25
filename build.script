@@ -1,0 +1,3 @@
+cargo build --release
+mkdir -p "%bin%"
+install -m 755 target/release/anynix "%bin%/anynix"
