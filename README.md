@@ -5,6 +5,23 @@ CLI Rust de conditionnement et de vérification d'attestations Ed25519/BLAKE3.
 
 Le contrat provisoire du futur registre Rails est décrit dans [API.md](API.md).
 
+## Lancer un programme local
+
+```sh
+anynix run firefox --private-window
+```
+
+Cette commande lance le fichier régulier `/apps/bin/firefox`, sans recherche
+dans `PATH`, et transmet ses arguments directement, sans shell. Le processus,
+son environnement et ses accès sont ceux de l'utilisateur ; ce n'est pas une
+sandbox. `--prefix /chemin` permet de choisir une autre arborescence et doit
+précéder le nom du programme.
+
+Anynix ne vérifie pas encore la provenance ou l'intégrité de ces exécutables :
+utilisez uniquement un répertoire et des fichiers de confiance. Les liens
+symboliques ne sont pas acceptés pour `bin` ou le programme. L'installation,
+la gestion des bibliothèques et `run --ephemeral` ne sont pas implémentées.
+
 Le module Rust `release_v2` contient les premiers contrôles de schéma,
 canonisation et signatures du format v2. Il ne valide pas TUF, la fraîcheur
 des clés, les blobs distants ni l'exécution réelle des builds. Il n'est pas

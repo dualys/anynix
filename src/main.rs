@@ -4,6 +4,7 @@ mod cli;
 mod crypto;
 mod proxmox;
 pub mod release_v2;
+mod runner;
 
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
@@ -71,6 +72,11 @@ async fn run() -> Result<()> {
             package.unpack(&dest)?;
             println!("Verified payload extracted to {}", dest.display());
         }
+        Command::Run {
+            prefix,
+            program,
+            args,
+        } => runner::run(&prefix, &program, &args)?,
         Command::Submit { archive: path } => {
             let package = archive::Package::read(&path)?;
             package.verify(&crypto::trust_dir()?)?;

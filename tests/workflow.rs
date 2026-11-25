@@ -55,6 +55,53 @@ fn run(root: &Path, args: &[&str], success: bool) -> String {
     )
 }
 
+#[cfg(unix)]
+#[test]
+fn run_local_program_forwards_arguments_and_exit_status() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let bin = root.join("apps/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let program = bin.join("example");
+    fs::write(&program, b"#!/bin/sh\nprintf '<%s>\\n' \"$@\"\nexit 37\n").unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_anynix"))
+        .args([
+            "run",
+            "--prefix",
+            root.join("apps").to_str().unwrap(),
+            "example",
+            "--flag",
+            "two words",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(37));
+    assert_eq!(output.stdout, b"<--flag>\n<two words>\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn run_rejects_paths_missing_programs_and_links() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let bin = root.join("apps/bin");
+    fs::create_dir_all(&bin).unwrap();
+    symlink("/bin/sh", bin.join("link")).unwrap();
+    for program in ["../bin/sh", "/bin/sh", "missing", "link"] {
+        let output = run(root, &["run", "--prefix", "apps", program], false);
+        assert!(output.contains("error:"));
+    }
+    fs::create_dir(root.join("other")).unwrap();
+    symlink(&bin, root.join("other/bin")).unwrap();
+    let output = run(root, &["run", "--prefix", "other", "link"], false);
+    assert!(output.contains("must be a directory, not a link"));
+}
+
 #[test]
 fn pack_defaults_and_explicit_overrides() {
     let dir = tempfile::tempdir().unwrap();

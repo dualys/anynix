@@ -1,6 +1,6 @@
 use crate::crypto::Role;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::{ffi::OsString, path::PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -51,6 +51,17 @@ pub enum Command {
         /// New destination directory
         #[arg(short = 'o', long)]
         dest: PathBuf,
+    },
+    /// Run a local executable from the application prefix without changing PATH
+    Run {
+        /// Application prefix containing bin/ (default: /apps)
+        #[arg(long, default_value = "/apps")]
+        prefix: PathBuf,
+        /// Executable name, not a path
+        program: OsString,
+        /// Arguments passed unchanged to the executable
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
     },
     /// Verify and prepare a submission locally; network transfer is not implemented
     Submit {
